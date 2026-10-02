@@ -18,8 +18,6 @@ from raftkv.proto import raft_pb2, raft_pb2_grpc
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
 logger = logging.getLogger("RaftKVWebDemo")
 
-# --- Web Cluster Controller ---
-
 class DemoClusterManager:
     def __init__(self, node_count: int = 5, base_port: int = 50400):
         self.node_count = node_count
@@ -28,6 +26,8 @@ class DemoClusterManager:
         self.nodes_meta: Dict[str, dict] = {}
         self.tasks: Dict[str, asyncio.Task] = {}
         self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.ops_counter = 0
+        self.latencies = []
         
         self.peer_addresses = {
             f"node-{i}": f"127.0.0.1:{base_port + i}"
@@ -59,7 +59,6 @@ class DemoClusterManager:
     async def get_cluster_status(self) -> dict:
         status_data = []
         leader_id = ""
-        kv_store_snapshot = {}
 
         for node_id, addr in self.peer_addresses.items():
             is_running = (node_id in self.tasks and not self.tasks[node_id].done())
@@ -88,15 +87,12 @@ class DemoClusterManager:
 
             status_data.append(node_info)
 
-        # Get KV store state from leader if available
-        if leader_id and leader_id in self.peer_addresses:
-            client = RaftKVClient(list(self.peer_addresses.values()))
-            # Fetch known test keys if any
-            
         return {
             "nodes": status_data,
             "leader_id": leader_id,
-            "peer_addresses": self.peer_addresses
+            "peer_addresses": self.peer_addresses,
+            "ops_total": self.ops_counter,
+            "avg_latency_ms": round(sum(self.latencies[-20:]) / max(1, len(self.latencies[-20:])), 2)
         }
 
     async def stop_node(self, node_id: str):
@@ -122,8 +118,6 @@ class DemoClusterManager:
 
 CLUSTER = DemoClusterManager()
 EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
-
-# --- HTML Frontend Template ---
 
 HTML_DASHBOARD = """<!DOCTYPE html>
 <html lang="en">
@@ -171,15 +165,29 @@ HTML_DASHBOARD = """<!DOCTYPE html>
 
         .logo-title { display: flex; align-items: center; gap: 0.75rem; }
         .logo-icon {
-            width: 40px; height: 40px;
+            width: 44px; height: 44px;
             background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
-            border-radius: 10px;
+            border-radius: 12px;
             display: grid; place-items: center;
-            font-weight: 700; color: #000;
+            font-weight: 700; color: #000; font-size: 1.2rem;
         }
 
         h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.5px; }
         .subtitle { color: var(--text-muted); font-size: 0.9rem; }
+
+        .metrics-bar {
+            display: flex; gap: 1rem; margin-bottom: 1.5rem;
+        }
+        .metric-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 0.75rem 1.25rem;
+            flex: 1;
+            display: flex; flex-direction: column;
+        }
+        .metric-title { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; }
+        .metric-value { font-size: 1.4rem; font-weight: 700; font-family: 'Fira Code', monospace; color: var(--accent-cyan); }
 
         .badge {
             background: rgba(16, 185, 129, 0.15);
@@ -195,7 +203,6 @@ HTML_DASHBOARD = """<!DOCTYPE html>
         .dot { width: 8px; height: 8px; background: var(--accent-green); border-radius: 50%; animation: pulse 1.5s infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-        /* Grid Layout */
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.25rem; margin-bottom: 2rem; }
 
         .card {
@@ -243,7 +250,6 @@ HTML_DASHBOARD = """<!DOCTYPE html>
         .btn-start { background: rgba(16, 185, 129, 0.2); color: var(--accent-green); border: 1px solid rgba(16, 185, 129, 0.4); }
         .btn-start:hover { background: var(--accent-green); color: #fff; }
 
-        /* Interactive Client Terminal */
         .panel {
             background: var(--bg-card);
             backdrop-filter: blur(12px);
@@ -288,6 +294,11 @@ HTML_DASHBOARD = """<!DOCTYPE html>
         }
         .log-entry { margin-bottom: 0.4rem; }
         .log-err { color: #fca5a5; }
+
+        .link-bar {
+            margin-top: 1rem; display: flex; justify-content: space-between; font-size: 0.85rem; color: var(--text-muted);
+        }
+        .link-bar a { color: var(--accent-cyan); text-decoration: none; }
     </style>
 </head>
 <body>
@@ -296,23 +307,40 @@ HTML_DASHBOARD = """<!DOCTYPE html>
             <div class="logo-title">
                 <div class="logo-icon">R</div>
                 <div>
-                    <h1>RaftKV Live Cluster</h1>
-                    <div class="subtitle">Strongly Consistent Distributed Key-Value Store Dashboard</div>
+                    <h1>RaftKV Distributed Control Plane</h1>
+                    <div class="subtitle">Strongly Consistent Raft Consensus Engine & Observability Suite</div>
                 </div>
             </div>
             <div class="badge">
                 <div class="dot"></div>
-                <span>5-Node Raft Cluster Active</span>
+                <span>5-Node Cluster Active</span>
             </div>
         </header>
 
-        <h2 style="font-size: 1.1rem; margin-bottom: 1rem; color: var(--text-muted);">CLUSTER NODES & CHAOS FAULT INJECTION</h2>
-        <div class="grid" id="nodes-grid">
-            <!-- Node cards rendered dynamically -->
+        <div class="metrics-bar">
+            <div class="metric-card">
+                <span class="metric-title">Cluster Leader</span>
+                <span class="metric-value" id="m-leader">Searching...</span>
+            </div>
+            <div class="metric-card">
+                <span class="metric-title">Total Operations</span>
+                <span class="metric-value" id="m-ops">0</span>
+            </div>
+            <div class="metric-card">
+                <span class="metric-title">Avg Latency</span>
+                <span class="metric-value" id="m-lat">0.00 ms</span>
+            </div>
+            <div class="metric-card">
+                <span class="metric-title">Prometheus Metrics</span>
+                <span class="metric-value" style="font-size: 1rem; margin-top: 0.3rem;"><a href="/metrics" target="_blank" style="color: var(--accent-cyan);">/metrics</a></span>
+            </div>
         </div>
 
+        <h2 style="font-size: 1.1rem; margin-bottom: 1rem; color: var(--text-muted);">CLUSTER TOPOLOGY & CHAOS INJECTION</h2>
+        <div class="grid" id="nodes-grid"></div>
+
         <div class="panel">
-            <div class="panel-title">⚡ Interactive Client KV Console</div>
+            <div class="panel-title">⚡ Interactive Client KV Console & Deduplication Engine</div>
             <div class="form-row">
                 <select id="op-select">
                     <option value="PUT">PUT</option>
@@ -325,8 +353,13 @@ HTML_DASHBOARD = """<!DOCTYPE html>
             </div>
 
             <div class="console-output" id="console">
-                <div class="log-entry">[System] RaftKV Interactive Client Ready. Issue Put/Get/Delete commands above.</div>
+                <div class="log-entry">[System] RaftKV Interactive Client Ready. Prom Metrics available at /metrics.</div>
             </div>
+        </div>
+
+        <div class="link-bar">
+            <span>RaftKV Architecture • SQLite WAL Engine • Protobuf over gRPC</span>
+            <a href="https://github.com/Charanloyal/raftkv" target="_blank">View GitHub Repository ↗</a>
         </div>
     </div>
 
@@ -336,6 +369,9 @@ HTML_DASHBOARD = """<!DOCTYPE html>
                 const res = await fetch('/api/status');
                 const data = await res.json();
                 renderNodes(data.nodes);
+                document.getElementById('m-leader').textContent = data.leader_id || 'Electing...';
+                document.getElementById('m-ops').textContent = data.ops_total;
+                document.getElementById('m-lat').textContent = data.avg_latency_ms + ' ms';
             } catch (e) {
                 console.error("Status fetch error", e);
             }
@@ -397,6 +433,7 @@ HTML_DASHBOARD = """<!DOCTYPE html>
                 } else {
                     log(`[Error] ${op} failed: ${data.error}`, true);
                 }
+                fetchStatus();
             } catch (e) {
                 log(`[Error] Request exception: ${e}`, true);
             }
@@ -419,8 +456,6 @@ HTML_DASHBOARD = """<!DOCTYPE html>
 </html>
 """
 
-# --- HTTP Request Handler ---
-
 class WebDemoHandler(BaseHTTPRequestHandler):
     def _set_json_headers(self, status=200):
         self.send_response(status)
@@ -430,11 +465,40 @@ class WebDemoHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/" or parsed.path == "/index.html":
+        if parsed.path in ["/", "/index.html"]:
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.end_headers()
             self.wfile.write(HTML_DASHBOARD.encode("utf-8"))
+
+        elif parsed.path == "/metrics":
+            # Expose Prometheus Metrics Endpoint
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4")
+            self.end_headers()
+            
+            future = asyncio.run_coroutine_threadsafe(CLUSTER.get_cluster_status(), EVENT_LOOP)
+            status_data = future.result(timeout=2.0)
+            
+            metrics = [
+                "# HELP raft_cluster_nodes_total Total number of nodes configured in Raft cluster",
+                "# TYPE raft_cluster_nodes_total gauge",
+                f"raft_cluster_nodes_total 5",
+                "# HELP raftkv_operations_total Total client operations executed",
+                "# TYPE raftkv_operations_total counter",
+                f"raftkv_operations_total {CLUSTER.ops_counter}",
+                "# HELP raftkv_avg_latency_ms Average operation latency in milliseconds",
+                "# TYPE raftkv_avg_latency_ms gauge",
+                f"raftkv_avg_latency_ms {round(sum(CLUSTER.latencies[-20:]) / max(1, len(CLUSTER.latencies[-20:])), 2)}"
+            ]
+            for n in status_data.get("nodes", []):
+                is_online = 1 if n["status"] == "ONLINE" else 0
+                is_leader = 1 if n["role"] == "LEADER" else 0
+                metrics.append(f'raft_node_online{{node_id="{n["node_id"]}"}} {is_online}')
+                metrics.append(f'raft_node_is_leader{{node_id="{n["node_id"]}"}} {is_leader}')
+
+            self.wfile.write("\n".join(metrics).encode("utf-8"))
+
         elif parsed.path == "/api/status":
             future = asyncio.run_coroutine_threadsafe(CLUSTER.get_cluster_status(), EVENT_LOOP)
             status_data = future.result(timeout=2.0)
@@ -447,7 +511,6 @@ class WebDemoHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         length = int(self.headers.get("Content-Length", 0))
         body_bytes = self.rfile.read(length) if length > 0 else b""
-        
         params = urllib.parse.parse_qs(parsed.query)
 
         if parsed.path == "/api/chaos/kill":
@@ -473,14 +536,24 @@ class WebDemoHandler(BaseHTTPRequestHandler):
             client = RaftKVClient(list(CLUSTER.peer_addresses.values()))
             
             async def run_op():
+                start_t = time.monotonic()
                 if op == "PUT":
                     res = await client.put(key, val, timeout=3.0)
+                    elapsed = (time.monotonic() - start_t) * 1000.0
+                    CLUSTER.ops_counter += 1
+                    CLUSTER.latencies.append(elapsed)
                     return {"success": res, "result": "OK" if res else "FAILED"}
                 elif op == "GET":
                     found, value = await client.get(key, timeout=3.0)
+                    elapsed = (time.monotonic() - start_t) * 1000.0
+                    CLUSTER.ops_counter += 1
+                    CLUSTER.latencies.append(elapsed)
                     return {"success": found, "result": value if found else "NOT_FOUND"}
                 elif op == "DELETE":
                     res = await client.delete(key, timeout=3.0)
+                    elapsed = (time.monotonic() - start_t) * 1000.0
+                    CLUSTER.ops_counter += 1
+                    CLUSTER.latencies.append(elapsed)
                     return {"success": res, "result": "DELETED" if res else "FAILED"}
                 return {"success": False, "error": "Unknown op"}
 
@@ -505,11 +578,11 @@ def run_web_server(port: int = 8080):
     CLUSTER.start_in_loop(EVENT_LOOP)
 
     server = HTTPServer(("0.0.0.0", port), WebDemoHandler)
-    logger.info(f"RaftKV Web Dashboard running at http://0.0.0.0:{port}")
+    logger.info(f"RaftKV Web Control Plane & Observability Suite running at http://0.0.0.0:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        logger.info("Web Dashboard stopping...")
+        logger.info("Web Control Plane stopping...")
         server.server_close()
 
 if __name__ == "__main__":

@@ -1,0 +1,38 @@
+name: RaftKV CI & Chaos Testing Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-and-verify:
+    name: Build, Test & Chaos Failover Verification
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile Protobuf Definitions
+        run: |
+          python generate_proto.py
+
+      - name: Run Unit & 5-Node Cluster Chaos Tests
+        run: |
+          python -m pytest tests/ --verbose
+
+      - name: Execute Benchmark Sanity Check
+        run: |
+          python benchmark.py --num-requests 50 --concurrency 5

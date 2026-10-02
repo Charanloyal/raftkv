@@ -1,5 +1,11 @@
 # RaftKV — Strongly Consistent Distributed Key-Value Store
 
+[![CI Pipeline](https://github.com/Charanloyal/raftkv/actions/workflows/ci.yml/badge.svg)](https://github.com/Charanloyal/raftkv/actions)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
+![gRPC](https://img.shields.io/badge/gRPC-v1.84-green)
+![Raft Spec](https://img.shields.io/badge/Raft-Ongaro%20%26%20Ousterhout-orange)
+![Prometheus](https://img.shields.io/badge/Observability-Prometheus%20%2Fmetrics-red)
+
 `RaftKV` is a production-grade, strongly consistent distributed key-value store built from scratch in Python 3.11+ using the **Raft Consensus Algorithm** (Ongaro & Ousterhout) over gRPC and Protobuf.
 
 ![RaftKV Live Dashboard Demo](docs/demo.webp)
