@@ -1,0 +1,103 @@
+version: '3.8'
+
+networks:
+  raftkv-net:
+    driver: bridge
+
+services:
+  raft-node-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: raft-node-1
+    hostname: raft-node-1
+    environment:
+      - NODE_ID=raft-node-1
+      - PORT=50051
+      - DATA_DIR=/var/lib/raftkv/data
+      - PEER_ADDRESSES=raft-node-1:50051,raft-node-2:50051,raft-node-3:50051,raft-node-4:50051,raft-node-5:50051
+    ports:
+      - "50051:50051"
+    volumes:
+      - node1-data:/var/lib/raftkv/data
+    networks:
+      - raftkv-net
+
+  raft-node-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: raft-node-2
+    hostname: raft-node-2
+    environment:
+      - NODE_ID=raft-node-2
+      - PORT=50051
+      - DATA_DIR=/var/lib/raftkv/data
+      - PEER_ADDRESSES=raft-node-1:50051,raft-node-2:50051,raft-node-3:50051,raft-node-4:50051,raft-node-5:50051
+    ports:
+      - "50052:50051"
+    volumes:
+      - node2-data:/var/lib/raftkv/data
+    networks:
+      - raftkv-net
+
+  raft-node-3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: raft-node-3
+    hostname: raft-node-3
+    environment:
+      - NODE_ID=raft-node-3
+      - PORT=50051
+      - DATA_DIR=/var/lib/raftkv/data
+      - PEER_ADDRESSES=raft-node-1:50051,raft-node-2:50051,raft-node-3:50051,raft-node-4:50051,raft-node-5:50051
+    ports:
+      - "50053:50051"
+    volumes:
+      - node3-data:/var/lib/raftkv/data
+    networks:
+      - raftkv-net
+
+  raft-node-4:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: raft-node-4
+    hostname: raft-node-4
+    environment:
+      - NODE_ID=raft-node-4
+      - PORT=50051
+      - DATA_DIR=/var/lib/raftkv/data
+      - PEER_ADDRESSES=raft-node-1:50051,raft-node-2:50051,raft-node-3:50051,raft-node-4:50051,raft-node-5:50051
+    ports:
+      - "50054:50051"
+    volumes:
+      - node4-data:/var/lib/raftkv/data
+    networks:
+      - raftkv-net
+
+  raft-node-5:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: raft-node-5
+    hostname: raft-node-5
+    environment:
+      - NODE_ID=raft-node-5
+      - PORT=50051
+      - DATA_DIR=/var/lib/raftkv/data
+      - PEER_ADDRESSES=raft-node-1:50051,raft-node-2:50051,raft-node-3:50051,raft-node-4:50051,raft-node-5:50051
+    ports:
+      - "50055:50051"
+    volumes:
+      - node5-data:/var/lib/raftkv/data
+    networks:
+      - raftkv-net
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
+  node5-data:
