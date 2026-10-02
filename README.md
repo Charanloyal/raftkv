@@ -2,6 +2,8 @@
 
 `RaftKV` is a production-grade, strongly consistent distributed key-value store built from scratch in Python 3.11+ using the **Raft Consensus Algorithm** (Ongaro & Ousterhout) over gRPC and Protobuf.
 
+![RaftKV Live Dashboard Demo](docs/demo.webp)
+
 ---
 
 ## 🏗 Architecture Overview
