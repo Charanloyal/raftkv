@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: raftkv-live-demo
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: "pip install -r requirements.txt && python generate_proto.py"
+    startCommand: "python web_demo.py"
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: PYTHONUNBUFFERED
+        value: "1"
