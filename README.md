@@ -53,7 +53,8 @@ sequenceDiagram
 2. **Durable Write-Ahead Log (WAL)**: ACID-compliant SQLite WAL engine (`wal.sqlite`) storing `currentTerm`, `votedFor`, log entries, and snapshot metadata with zero C-compilation dependencies.
 3. **Log Compaction & Snapshotting**: Automatic threshold-based log compaction. When uncompacted logs cross threshold (default: 50 entries), state machine state is atomically snapshot-compacted into `snapshot.json`. Slow or recovering nodes receive full state snapshots via `InstallSnapshot` RPC.
 4. **Smart Client Driver**: `RaftKVClient` transparently discovers cluster leaders, tracks client sequence numbers for request deduplication (at-most-once execution), and automatically redirects queries with exponential backoff during leader failovers.
-5. **Deterministic 5-Node Container Cluster**: Docker & Docker Compose setup spawning `raft-node-1` through `raft-node-5` on an isolated network bridge.
+5. **Deterministic 5-Node Container Cluster & Chaos Harness**: Docker & Docker Compose setup spawning `raft-node-1` through `raft-node-5` on an isolated network bridge, validated via automated fault-injection chaos testing (`chaos_runner.py`).
+6. **Full PRD & System Architecture**: Comprehensive [Product Requirements Document (PRD)](docs/PRD.md) and [System Architecture Specification](docs/ARCHITECTURE.md).
 
 ---
 
@@ -77,7 +78,14 @@ raftkv/
 ├── tests/
 │   ├── test_wal.py             # SQLite WAL & Snapshot Recovery Tests
 │   ├── test_raft_unit.py       # Raft State Machine Unit Tests
-│   └── test_cluster.py        # 5-Node Chaos & Failover Integration Harness
+│   ├── test_cluster.py         # 5-Node Cluster Failover Integration Harness
+│   └── test_fault_injection.py # 5-Node Chaos Matrix & Quorum Recovery Test
+├── docs/
+│   ├── PRD.md                  # Comprehensive Product Requirements Document
+│   ├── ARCHITECTURE.md         # Detailed System Architecture & Chaos Matrix
+│   └── demo.webp               # Visual Demo of Live Cluster UI
+├── chaos_runner.py             # Interactive 5-Node Fault-Injection Scenario Runner
+├── web_demo.py                 # Live Cluster Management & Real-time Web UI Dashboard
 ├── benchmark.py                # Performance & Latency Benchmark Utility
 ├── generate_proto.py           # Protobuf Compilation Script
 ├── Dockerfile                  # Container Build Recipe
@@ -144,9 +152,35 @@ python client.py delete user:100 --cluster 127.0.0.1:50051,127.0.0.1:50052,127.0
 
 ---
 
-## 💥 Chaos Fault Injection & Cluster Failover Test
+## 🖥 Live Cluster Management & Web Dashboard Demo
 
-Test leader failover and log recovery by stopping the active leader container:
+Launch the live 5-node cluster management web interface:
+
+```bash
+python web_demo.py
+```
+Open **`http://localhost:8080`** in your browser to view:
+- Live real-time node topology, terms, roles (`LEADER` / `FOLLOWER`), and commit indices.
+- Interactive Chaos Controls: Instantly kill or revive any node with one click.
+- Real-time Key-Value Put / Get / Delete console with live latency measurements.
+
+---
+
+## 💥 Chaos Fault Injection & Cluster Failover Suite
+
+Execute the automated 4-stage 5-node fault-injection chaos scenario matrix:
+
+```bash
+python chaos_runner.py
+```
+
+### Automated Scenario Coverage:
+1. **Cluster Bootstrap & Leader Convergence**: Verifies quorum election.
+2. **Abrupt Leader SIGKILL**: Measures failover election latency (**< 1.0s target SLA**).
+3. **Minority Partition Tolerance**: 2 nodes isolated, 3 surviving nodes maintain quorum and commit writes without split-brain.
+4. **Partition Healing & Re-attachment**: Re-attached nodes catch up logs and synchronize state with 100% data integrity.
+
+Alternatively, test containerized failover directly via Docker:
 
 ```bash
 # 1. Stop Node 1 (Leader)
