@@ -1,11 +1,13 @@
 # System Architecture & Technical Specification
 ## RaftKV: Replicated Distributed Key-Value Store
 
+> Implementation notes, updated during a code audit so that this document matches the code. Known gaps and bugs are listed in the README under "Consistency guarantees" and "Known limitations".
+
 ```mermaid
 graph TD
     subgraph Clients ["Smart Client Drivers"]
         C1[Client App / CLI]
-        C2[Locust Benchmark / Stress]
+        C2[benchmark.py]
     end
 
     subgraph Cluster ["5-Node Raft Consensus Cluster (Quorum = 3)"]
@@ -63,27 +65,29 @@ graph TD
 
 1. **Consensus Module (`raftkv/consensus/engine.py`)**:
    - Manages node roles: `FOLLOWER`, `CANDIDATE`, `LEADER`.
-   - Drives randomized election timers ($150\text{ ms} - 350\text{ ms}$) via `asyncio`.
-   - Dispatches parallel `AppendEntries` and `RequestVote` RPCs through `RPCClientPool`.
+   - Drives randomized election timers ($150\text{ ms} - 300\text{ ms}$) via `asyncio`.
+   - Dispatches parallel `AppendEntries` and `RequestVote` RPCs through `PeerRPCClient` (`raftkv/consensus/rpc_client.py`).
    - Tracks `matchIndex` and `nextIndex` for every cluster peer.
-   - Calculates quorum match progress to advance `commitIndex`.
+   - Calculates quorum match progress to advance `commitIndex` (current-term entries only).
+   - Serves `Get` from the leader's local state machine without a ReadIndex/lease check, so reads can be stale.
+   - Peer membership is static; there is no membership-change protocol.
 
 2. **Durable Storage & Write-Ahead Log (`raftkv/storage/wal.py`)**:
-   - SQLite backed WAL file (`wal.sqlite`) configured with `PRAGMA synchronous = NORMAL` and `PRAGMA journal_mode = WAL`.
+   - SQLite file per node (`wal_<node_id>.sqlite`) configured with `PRAGMA synchronous = FULL` and `PRAGMA journal_mode = WAL`.
    - Stores:
-     - `metadata`: `current_term`, `voted_for`, `last_snapshot_index`, `last_snapshot_term`.
-     - `entries`: `(index INTEGER PRIMARY KEY, term INTEGER, command_type TEXT, key TEXT, value TEXT, client_id TEXT, sequence_num INTEGER)`.
-   - Provides $O(1)$ indexed reads and atomic log truncation (`DELETE FROM entries WHERE index >= ?`).
+     - `metadata` (key/value): `current_term`, `voted_for`, `last_included_index`, `last_included_term`.
+     - `log`: `(log_index INTEGER PRIMARY KEY, term INTEGER, op INTEGER, key TEXT, value TEXT, client_id TEXT, sequence_num INTEGER)`.
+   - The full log is loaded into memory at start-up; runtime reads use the in-memory list. Suffix truncation is `DELETE FROM log WHERE log_index >= ?`.
 
 3. **In-Memory State Machine (`raftkv/storage/state_machine.py`)**:
-   - Deterministic in-memory hash map applying linearizable mutations strictly when committed.
-   - Maintains client response table `(client_id -> {sequence_num, result})` to deduplicate retried network requests.
+   - Deterministic in-memory hash map applying mutations strictly when committed.
+   - Keeps the highest applied `sequence_num` per `client_id` (`last_seq`) and skips writes with a sequence number â‰¤ that value. Responses are not cached.
 
 4. **Snapshot & Log Compaction Engine (`raftkv/storage/snapshot.py`)**:
-   - Triggers when `last_applied - last_snapshot_index >= 50`.
-   - Atomically exports state machine key-value store to `snapshot.json`.
-   - Prunes log entries up to `last_snapshot_index`.
-   - Serves `InstallSnapshot` RPC to lagging peers.
+   - Triggers in the apply loop when the in-memory log holds â‰¥ 50 entries (`len(log) >= snapshot_threshold`).
+   - Writes the key-value map and `last_seq` table to `snapshot.json` (temp file + `fsync` + `os.replace`).
+   - Prunes log entries up to `last_applied`.
+   - Serves `InstallSnapshot` RPC to lagging peers (whole snapshot in one message).
 
 ---
 
@@ -127,42 +131,18 @@ sequenceDiagram
 
 ## 3. 5-Node Fault-Injection Scenario Matrix
 
-The test harness evaluates the 5-node cluster against critical failure modes:
+The scenarios are implemented in `tests/test_fault_injection.py`, `tests/test_cluster.py` and `chaos_runner.py`. All of them run the five nodes as asyncio tasks in one Python process on loopback; "crash" means cancelling a node's task (SQLite is closed cleanly). The Docker Compose cluster is not used by any automated test.
 
-| Scenario ID | Test Scenario | Chaos Action | Invariant Assertions |
+| Scenario ID | Test Scenario | Chaos Action | What is actually asserted |
 | :--- | :--- | :--- | :--- |
-| **CHAOS-01** | Leader Abrupt Crash | Instant `task.cancel()` on active leader container | 1. Follower election timeout triggers.<br>2. Exactly one new leader elected in $< 1.0\text{s}$.<br>3. Term incremented by $+1$. |
-| **CHAOS-02** | Minority Partition (2 nodes down) | Terminate Node 4 and Node 5 | 1. 3 nodes remain online ($\lfloor 5/2 \rfloor + 1 = 3$, quorum intact).<br>2. Writes to leader succeed.<br>3. No split-brain occurs. |
-| **CHAOS-03** | Partition Rejoin & Log Catch-Up | Restart Node 4 and Node 5 after 100 new entries | 1. Leader discovers lagging peers.<br>2. Replicates missed entries via `AppendEntries` or `InstallSnapshot`.<br>3. State machine across all 5 nodes converges identically. |
-| **CHAOS-04** | Rolling Leader Failover Under Load | Kill leader, write 20 keys, kill new leader, repeat | 1. Zero lost writes during re-election windows.<br>2. Smart client reconnects with backoff.<br>3. All 20 keys verified via linearizable GET queries. |
+| **CHAOS-01** | Leader crash | `task.cancel()` on the leader's in-process server task | A node other than the old leader reports itself leader within the polling window (~2 s in `test_cluster.py`, ~5 s in `test_fault_injection.py`, 3 s in `chaos_runner.py`). Election time is logged/printed, **not asserted** against 1.0 s. Term change is not checked. |
+| **CHAOS-02** | Two nodes down | Stop two non-leader nodes (whichever two of node-2..node-5 are not leader) | A client `Put` succeeds with 3/5 nodes running. Split-brain is not checked; no network partition is injected. |
+| **CHAOS-03** | Restart & catch-up | Restart the two stopped nodes after one new entry | Keys written before/after the failures are readable **through the leader**. The restarted nodes' state is not inspected. |
+| **CHAOS-04** | Rolling leader failover under load | â€” | **Not implemented.** |
 
 ---
 
 ## 4. Benchmark & Performance Profile
 
-Results on an isolated 5-node loopback environment (20 concurrent async workers):
+No benchmark output is committed. A previous version of this section showed 609.76 PUT ops/s and 1,785.71 GET ops/s (500 requests, concurrency 20) without hardware details or a recorded run; it has been removed. See the README "Benchmarks" section for how to produce and record a reproducible run, and for caveats about `benchmark.py` (single shared client ID; GETs are leader-local reads).
 
-```
-==================================================
-       RaftKV Cluster Benchmark Suite
- Total Requests: 500 | Concurrency: 20
-==================================================
-
---- PUT Results ---
- Successful Ops : 500 / 500 (100.0%)
- Total Duration : 0.82 s
- Throughput     : 609.76 ops/sec (QPS)
- Avg Latency    : 31.45 ms
- p50 Latency    : 28.12 ms
- p95 Latency    : 54.30 ms
- p99 Latency    : 68.90 ms
-
---- GET Results ---
- Successful Ops : 500 / 500 (100.0%)
- Total Duration : 0.28 s
- Throughput     : 1785.71 ops/sec (QPS)
- Avg Latency    : 10.82 ms
- p50 Latency    : 8.40 ms
- p95 Latency    : 21.10 ms
- p99 Latency    : 32.50 ms
-```

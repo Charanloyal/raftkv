@@ -3,18 +3,39 @@
 
 | Document Version | 1.0.0 |
 | :--- | :--- |
-| Status | Approved & Production Implemented |
+| Status | Draft — targets below; see §0 for what is implemented |
 | Author | Charan Loyal (Distributed Systems & AI Infrastructure Engineer) |
 | Target System | 5-Node High-Availability Replicated Key-Value Consensus Store |
 | Core Protocols | Raft Consensus (Ongaro & Ousterhout), gRPC over HTTP/2, Protobuf v3 |
 
 ---
 
+## 0. Implementation Status (audit, against the code in this repository)
+
+This PRD states goals. The table records which ones the current code meets; details are in the README ("Consistency guarantees", "Known limitations").
+
+| Item | Status |
+| :--- | :--- |
+| G-01 failover < 1.0 s | Not verified. Tests/`chaos_runner.py` print the failover time but do not assert it, and no run output is committed. Election timeouts are 150–300 ms, so sub-second failover is plausible on loopback. |
+| G-02 survive 2 crashes, zero data loss | Partial. A write commits with 2 of 5 nodes stopped (in-process). "Zero data loss" is not demonstrated and a known bug lets a deposed leader acknowledge a write that was never committed. |
+| G-03 linearizability | Not met. Reads are served from the leader's local state without ReadIndex/lease; no linearizability checker exists. |
+| G-04 > 1,500 GET / > 500 PUT ops/s | Not verified. No benchmark output is committed; there is no Locust setup. |
+| G-05 compaction at 50 entries | Implemented (`snapshot_threshold=50`). Covered by WAL compaction unit test only. |
+| §4.1 election timeouts | Implemented as 150–300 ms (not 150–350 ms). |
+| §4.3 exponential backoff with jitter | Not implemented; client retries after fixed 0.2–0.3 s pauses. |
+| §4.3 at-most-once on retries | Implemented for one outstanding request per client; not exactly-once (responses not cached). |
+| §4.4 SIGKILL, network partitions, high-concurrency churn | Not implemented. Nodes are stopped by cancelling asyncio tasks in one process. |
+| §5 multi-stage Dockerfile | Single-stage `python:3.11-slim` image. |
+| §5 Prometheus `ops_total`, `latency_p95`, `election_count` | Not implemented. `web_demo.py` exposes `raftkv_operations_total`, `raftkv_avg_latency_ms`, `raft_node_online`, `raft_node_is_leader`. |
+| Membership changes | Not in scope of this PRD and not implemented (static peer list). |
+
+---
+
 ## 1. Executive Summary & Vision
 
-Modern cloud-native and quant infrastructure architectures require zero-data-loss, linearizable state storage to coordinate critical microservices, distributed locks, configuration flags, and transactional ledgers. **RaftKV** is a clean-slate, production-grade, distributed key-value store engineered in Python 3.11+ using the **Raft Consensus Algorithm** running over asynchronous gRPC stubs.
+Modern cloud-native and quant infrastructure architectures require zero-data-loss, linearizable state storage to coordinate critical microservices, distributed locks, configuration flags, and transactional ledgers. **RaftKV** is a clean-slate distributed key-value store written in Python 3.11+ using the **Raft Consensus Algorithm** running over asynchronous gRPC stubs.
 
-The system guarantees **Linearizability (Strong Consistency)**, **High Availability under $f < N/2$ node failures**, **ACID Write-Ahead Logging (WAL)** via an embedded engine, **dynamic log compaction with snapshots**, and automated **smart-client leader redirection**.
+The design targets **Linearizability (Strong Consistency)**, **High Availability under $f < N/2$ node failures**, **durable Raft state via an embedded SQLite engine**, **dynamic log compaction with snapshots**, and automated **smart-client leader redirection** (see §0 for which targets are met).
 
 ---
 
